@@ -1,0 +1,163 @@
+- hosts: localhost
+
+  vars:
+    digital_ocean_token: DIGITAL OCEAN KEY HERE
+    droplet_region: nyc1
+    droplet_image: centos-7-x64
+
+    droplet_names:
+    - WORDPRESS SERVER 1
+    - WORDPRESS SERVER 2
+    - WORDPRESS SERVER 3
+
+  tasks:
+
+  - name: Add Public SSH to Digital Ocean
+    digital_ocean_sshkey:
+      name: "wordpress-server-ssh-key"
+      oauth_token: "{{ digital_ocean_token }}"
+      ssh_pub_key: "{{lookup('file', '/root/.ssh/id_rsa.pub') }}"
+      state: present
+    register: sshkey_result
+
+  - name: Create New Droplets
+    digital_ocean_droplet:
+      name: "{{ item }}"
+      unique_name: yes
+      oauth_token: "{{ digital_ocean_token }}"
+      size: "{{ droplet_size }}"
+      region: "{{ droplet_region }}"
+      image: "{{ droplet_image }}"
+      wait_timeout: 600
+      ssh_keys: ["{{ sshkey_result.data.ssh_key.id }}"]
+      state: present
+    with_items: "{{ droplet_names }}"
+    register: droplet_result
+
+  - name: Add IP to Hosts
+    add_host:
+      name: "{{ item.data.ip_address }}"
+      group: digitalocean
+    with_items: "{{ droplet_result.results }}"
+
+  - name: Minute Pause
+    pause:
+      seconds: 60
+
+- hosts: digitalocean
+
+  tasks:
+
+  - name: Epel Release
+    yum:
+      name: epel-release
+      state: latest
+
+  - name: Yum Update
+    yum: name=* state=latest
+
+  - name: Install Apache, MariaDB Server, Python 2 & 3, and GIT
+    yum:
+      name:
+        - httpd
+        - mariadb-server
+        - python2
+        - python3
+        - git
+      state: latest
+
+  - name: Download PIP
+    shell: curl -sSL https://bootstrap.pypa.io/pip/2.7/get-pip.py -o ~/get-pip.py
+
+  - name: Install PIP
+    script: ~/get-pip.py
+    args:
+      executable: python
+
+  - name: Run Apache and MariaDB
+    service:
+      name: "{{ item }}"
+      state: started
+      enabled: yes
+    with_items:
+      - ['httpd', 'mariadb']
+
+  - name: Add Remi Repository
+    yum:
+      name: https://rpms.remirepo.net/enterprise/remi-release-7.rpm
+      state: present
+
+  - name: Install PHP
+    yum:
+      enablerepo: "remi,remi-php80"
+      name:
+      - php
+      - php-common
+      - php-cli
+      - php-gd
+      - php-curl
+      - php-mysqlnd
+      - php-fpm
+      - php-mysqli
+      - php-json
+      state: latest
+
+  - name: Install MySQL
+    pip:
+      name: PyMySQL
+      state: latest
+
+  - name: Create MariaDB Database
+    mysql_db: name=wordpress state=present
+
+  - name: Create MariaDB user
+    mysql_user: name=wordpress password=Password1! priv="*.*:ALL,GRANT" state=present
+
+  - name: Flush Privilege
+    command: "mysql -ne \"FLUSH PRIVILEGES\""
+
+  - name: Restart MariaDB
+    service: name=mariadb state=restarted
+
+  - name: Create "Wordpress" directory in apache web-root
+    file:
+      path: /var/www/html/Wordpress
+      state: directory
+
+  - name: Clone WordPress to Apache, do not update files
+    git:
+      repo: https://github.com/WordPress/WordPress
+      dest: /var/www/html/Wordpress
+      clone: yes
+      update: no
+
+  - name: Set Wordpress Directory Ownership
+    file:
+      path: "/var/www/html"
+      state: directory
+      recurse: yes
+      owner: apache
+      group: apache
+
+  - name: Set Wordpress Directory Permissions
+    shell: "/usr/bin/find /var/www/html -type d -exec chmod 777 {} \\;"
+
+  - name: Copy wp-config.php
+    command: mv /var/www/html/Wordpress/wp-config-sample.php /var/www/html/Wordpress/wp-config.php creates=/var/www/html/Wordpress/wp-config.php
+    become: yes
+    
+  - name: Set Wordpress File Permissions
+    shell: "/usr/bin/find /var/www/html/ -type f -exec chmod 777 {} \\;"
+    
+  - name: Update WordPress config file
+    lineinfile:
+      path: "/var/www/html/Wordpress/wp-config.php"
+      regexp: "{{item.regexp}}"
+      line: "{{item.line}}"
+    with_items:
+      - {'regexp': "define\\( 'DB_NAME', '(.)+' \\);", 'line': "define( 'DB_NAME', 'wordpress' );"}
+      - {'regexp': "define\\( 'DB_USER', '(.)+' \\);", 'line': "define( 'DB_USER', 'wordpress' );"}
+      - {'regexp': "define\\( 'DB_PASSWORD', '(.)+' \\);", 'line': "define( 'DB_PASSWORD', 'Password1!' );"}
+
+  - name: Restart Apache
+    service: name=httpd state=restarted
